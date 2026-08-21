@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codex Token Observatory</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="grain"></div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div>
+          <p class="eyebrow" id="processLabel">LOCAL TELEMETRY / CODEX</p>
+          <h1>TOKEN<span>//</span>OBSERVATORY</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="process-switch" role="tablist" aria-label="进程切换"><button type="button" data-process="codex" class="active">CODEX</button><button type="button" data-process="pi">PI</button></div>
+        <label class="thread-picker"><span id="threadLabel">线程</span><input id="threadSearch" type="search" placeholder="搜索线程…" autocomplete="off" /><select id="threadSelect"><option>正在连接…</option></select></label>
+        <label class="refresh-toggle" title="暂停或恢复页面数据自动刷新"><span>自动刷新</span><input id="autoRefresh" type="checkbox" checked /><i></i></label>
+        <div id="connection" class="status-pill"><i></i><span>CONNECTING</span></div>
+      </div>
+    </header>
+
+    <section class="top-summary-grid">
+      <article class="usage-panel top-usage-panel">
+        <div class="section-head"><div><p class="eyebrow">ACCOUNT WINDOW</p><h3>使用量总览</h3></div><span class="source" id="usageSource">—</span></div>
+        <div class="quota-strip">
+          <div class="quota-copy">
+            <p class="eyebrow"><span id="quotaLabel">AVAILABLE CAPACITY</span> <strong id="quotaRemaining">—</strong></p>
+            <p id="quotaUsageHint">等待 Codex rate-limit 数据…</p>
+          </div>
+          <div class="reset-overview">
+            <span class="pulse"></span>
+            <div><p class="eyebrow">RESET TIME</p><strong id="quotaResetAt">—</strong><small id="quotaResetWindow">—</small></div>
+          </div>
+          <div class="quota-meter"><span id="quotaMeter"></span></div>
+        </div>
+        <div class="usage-cards">
+          <div class="usage-stat featured"><span>今日已用额度</span><strong id="todayTokens">—</strong><small>local calendar day</small></div>
+          <div class="usage-stat"><span>重置以来</span><strong id="resetTokens">—</strong><small id="resetLabel">active window</small></div>
+          <div class="usage-stat"><span>累计使用</span><strong id="lifetimeTokens">—</strong><small>available history</small></div>
+        </div>
+      </article>
+      <article class="thread-panel top-thread-panel">
+        <div class="section-head"><div><p class="eyebrow">ACTIVE THREAD</p><h3>当前线程</h3></div><span class="live-dot"></span></div>
+        <div class="thread-title" id="threadName">—</div>
+        <dl class="thread-meta"><div><dt>MODEL</dt><dd id="threadModel">—</dd></div><div><dt>STATUS</dt><dd id="threadStatus">—</dd></div><div><dt>THREAD ID</dt><dd id="threadId">—</dd></div></dl>
+        <div class="thread-totals"><div><span>LAST TURN</span><strong id="lastTurn">—</strong></div><div><span>THREAD TOTAL</span><strong id="threadTotal">—</strong></div></div>
+      </article>
+    </section>
+
+    <section class="metrics-grid">
+      <article class="metric-card context-card">
+        <div class="card-head"><span class="card-label">CONTEXT WINDOW</span><span class="tag green" id="contextTag">—</span></div>
+        <div class="context-main">
+          <div class="ring" id="contextRing"><div><strong id="contextPercent">—</strong><small>USED</small></div></div>
+          <div class="context-numbers"><strong id="contextUsed">—</strong><span id="contextCapacity">capacity unavailable</span><p id="contextModel">—</p></div>
+        </div>
+        <div class="meter"><span id="contextMeter"></span></div>
+        <div class="micro-row"><span>当前输入上下文</span><b id="contextUsedSmall">—</b></div>
+      </article>
+
+      <article class="metric-card throughput-card">
+        <div class="card-head"><span class="card-label">OUTPUT VELOCITY</span><span class="tag amber">LIVE</span></div>
+        <div class="big-number"><strong id="throughput">0</strong><span>tok/s</span></div>
+        <div class="spark-wrap"><svg id="spark" viewBox="0 0 320 72" preserveAspectRatio="none"><path class="spark-fill"></path><path class="spark-line"></path></svg></div>
+        <div class="micro-row"><span>滑动平均</span><b id="throughputAverage">0 tok/s</b></div>
+      </article>
+
+      <article class="metric-card cache-card">
+        <div class="card-head"><span class="card-label">CACHE SIGNAL</span><span class="tag cyan">READ</span></div>
+        <div class="big-number"><strong id="currentCache">—</strong><span>tokens</span></div>
+        <div class="cache-bars"><div><span>当前命中缓存</span><i><b id="cacheBar"></b></i></div><div><span>今日累计缓存</span><strong id="todayCache">—</strong></div></div>
+        <div class="micro-row"><span>当前 turn 命中率</span><b id="cacheHit">—</b></div>
+      </article>
+    </section>
+
+    <section class="lower-grid">
+      <div class="left-column">
+        <article class="model-panel">
+          <div class="section-head"><div><p class="eyebrow">MODEL MIX</p><h3>按模型分布</h3></div><span class="muted">来自本地 usage 记录</span></div>
+          <div id="models" class="models"><div class="empty">等待 usage 数据…</div></div>
+        </article>
+      </div>
+
+      <aside class="side-column">
+        <article class="notes-panel">
+          <div class="section-head"><div><p class="eyebrow">INSTRUMENT NOTES</p><h3>读数说明</h3></div><span class="info">i</span></div>
+          <ul id="notes"></ul>
+          <div class="privacy"><span>⌁</span><p>本地优先<br><b>不上传 prompt / token 数据</b></p></div>
+        </article>
+      </aside>
+    </section>
+    <footer><span>CODEX TOKEN OBSERVATORY · v0.1</span><span id="historyInfo">history scanner idle</span></footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

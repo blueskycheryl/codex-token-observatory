@@ -1,0 +1,37 @@
+{
+  "name": "codex-token-observer",
+  "version": "0.1.0",
+  "description": "A local Codex token observatory backed by app-server usage events and rollout history.",
+  "author": {
+    "name": "Local developer"
+  },
+  "homepage": "https://developers.openai.com/codex",
+  "repository": "https://github.com/openai/codex",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "tokens",
+    "usage",
+    "context-window",
+    "observability"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Token Observatory",
+    "shortDescription": "Watch Codex context and token usage in a live local window.",
+    "longDescription": "A privacy-first local dashboard for Codex. It reads official app-server token usage and local rollout JSONL files to show current context, output tokens per second, cache tokens, today's usage, usage since the active rate-limit reset window, and a model breakdown.",
+    "developerName": "Local developer",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Open the Codex token observatory.",
+      "Show my current Codex context and token usage.",
+      "Explain where the token usage numbers come from."
+    ],
+    "brandColor": "#B6F36B",
+    "logo": "./assets/observatory.svg",
+    "screenshots": []
+  }
+}
