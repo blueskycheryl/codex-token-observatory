@@ -81,6 +81,75 @@ function renderModels(models) {
   if (!models?.length) { root.innerHTML = '<div class="empty">等待 usage 数据…</div>'; return; }
   root.innerHTML = models.slice(0, 8).map((model) => `<div class="model-row"><span class="model-name" title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</span><div class="model-bar"><span style="width:${Math.max(2, Math.min(100, Number(model.sharePercent) || 0))}%"></span></div><span class="model-tokens">${fmt(model.totalTokens)}</span><span class="model-share">${pct(model.sharePercent)}</span></div>`).join('');
 }
+let usagePeriod = localStorage.getItem('codex-token-observer:usage-period') || 'month';
+
+function localIsoDate(date) {
+  const value = new Date(date);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+function shiftDate(dateText, days) {
+  const date = new Date(`${dateText}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return localIsoDate(date);
+}
+function usageWeekStart(dateText) {
+  const date = new Date(`${dateText}T00:00:00`);
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return localIsoDate(date);
+}
+function renderUsageTimeline(timeline) {
+  const daily = (timeline?.daily || []).filter((item) => item?.date).sort((a, b) => a.date.localeCompare(b.date));
+  const today = localIsoDate(new Date());
+  const fromInput = $('usageFrom');
+  const toInput = $('usageTo');
+  if (!fromInput.value) fromInput.value = shiftDate(today, -29);
+  if (!toInput.value) toInput.value = today;
+
+  let bars = [];
+  let periodLabel = '按月';
+  if (usagePeriod === 'custom' || usagePeriod === 'day') {
+    const from = usagePeriod === 'custom' ? fromInput.value : shiftDate(today, -29);
+    const to = usagePeriod === 'custom' ? toInput.value : today;
+    const start = from <= to ? from : to;
+    const end = from <= to ? to : from;
+    const values = new Map(daily.map((item) => [item.date, Number(item.tokens) || 0]));
+    const cursor = new Date(`${start}T00:00:00`);
+    const finish = new Date(`${end}T00:00:00`);
+    while (cursor <= finish && bars.length < 120) {
+      const date = localIsoDate(cursor);
+      bars.push({ key: date, label: date.slice(5), tokens: values.get(date) || 0 });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    periodLabel = usagePeriod === 'custom' ? '自定义每日' : '最近 30 天';
+  } else {
+    const groups = new Map();
+    for (const item of daily) {
+      const key = usagePeriod === 'week' ? usageWeekStart(item.date) : item.date.slice(0, 7);
+      const current = groups.get(key) || { key, tokens: 0 };
+      current.tokens += Number(item.tokens) || 0;
+      groups.set(key, current);
+    }
+    bars = [...groups.values()].slice(-12).map((item) => ({
+      ...item,
+      label: usagePeriod === 'week' ? item.key.slice(5) : item.key,
+    }));
+    periodLabel = usagePeriod === 'week' ? '按周' : '按月';
+  }
+
+  const root = $('usageChart');
+  if (!bars.length) {
+    root.innerHTML = '<div class="empty">暂无可用 usage 数据</div>';
+    setText('timelineSummary', `${periodLabel} · 暂无数据`);
+    setText('timelineSource', timeline?.source === 'official' ? 'Codex account/usage' : 'local history');
+    return;
+  }
+  const max = Math.max(...bars.map((item) => item.tokens), 1);
+  root.innerHTML = bars.map((item) => `<div class="usage-bar-item" title="${escapeHtml(item.key)} · ${exact(item.tokens)} tokens"><div class="usage-bar-value">${fmt(item.tokens)}</div><div class="usage-bar-track"><i style="height:${Math.max(item.tokens ? 4 : 1, (item.tokens / max) * 100)}%"></i></div><span>${escapeHtml(item.label)}</span></div>`).join('');
+  const total = bars.reduce((sum, item) => sum + item.tokens, 0);
+  setText('timelineSummary', `${periodLabel} · ${bars.length} 个区间 · ${fmt(total)} tokens`);
+  setText('timelineSource', timeline?.source === 'official' ? 'Codex account/usage' : 'local history');
+  document.querySelectorAll('[data-usage-period]').forEach((button) => button.classList.toggle('active', button.dataset.usagePeriod === usagePeriod));
+}
 function updateProcessSwitch(processName) {
   const process = processName === 'pi' ? 'pi' : 'codex';
   document.querySelectorAll('[data-process]').forEach((button) => button.classList.toggle('active', button.dataset.process === process));
@@ -119,6 +188,9 @@ function render(state) {
 
   setText('throughput', Math.round(state.throughput?.current || 0));
   setText('throughputAverage', `${Math.round(state.throughput?.average || 0)} tok/s`);
+  const throughputSource = state.throughput?.source || 'idle';
+  setText('throughputTag', throughputSource === 'live' ? 'LIVE' : (throughputSource === 'history' ? 'RECENT' : 'IDLE'));
+  $('throughputTag').className = `tag ${throughputSource === 'idle' ? 'cyan' : 'amber'}`;
   drawSpark(state.throughput?.series || []);
   setText('currentCache', fmt(state.account?.currentCachedTokens));
   setText('todayCache', fmt(state.account?.todayCachedTokens));
@@ -131,6 +203,7 @@ function render(state) {
   setText('lifetimeTokens', fmt(state.account?.lifetimeTokens));
   setText('resetLabel', state.account?.windowLabel || (state.resetWindow?.durationMinutes ? `${state.resetWindow.durationMinutes} min window` : 'active window'));
   renderModels(state.models);
+  renderUsageTimeline(state.usageTimeline);
 
   const thread = state.selectedThread;
   setText('threadName', thread?.name || '暂无活动线程');
@@ -185,6 +258,18 @@ $('threadSearch').addEventListener('keydown', (event) => {
     updateThreadSelect(currentState?.threads || [], currentState?.selectedThreadId);
   }
 });
+document.querySelectorAll('[data-usage-period]').forEach((button) => {
+  button.addEventListener('click', () => {
+    usagePeriod = button.dataset.usagePeriod;
+    localStorage.setItem('codex-token-observer:usage-period', usagePeriod);
+    renderUsageTimeline(currentState?.usageTimeline);
+  });
+});
+['usageFrom', 'usageTo'].forEach((id) => $(id).addEventListener('change', () => {
+  usagePeriod = 'custom';
+  localStorage.setItem('codex-token-observer:usage-period', usagePeriod);
+  renderUsageTimeline(currentState?.usageTimeline);
+}));
 $('autoRefresh').checked = autoRefresh;
 $('autoRefresh').addEventListener('change', (event) => {
   autoRefresh = event.target.checked;

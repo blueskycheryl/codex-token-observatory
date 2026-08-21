@@ -65,7 +65,7 @@
       </article>
 
       <article class="metric-card throughput-card">
-        <div class="card-head"><span class="card-label">OUTPUT VELOCITY</span><span class="tag amber">LIVE</span></div>
+        <div class="card-head"><span class="card-label">OUTPUT VELOCITY</span><span class="tag amber" id="throughputTag">LIVE</span></div>
         <div class="big-number"><strong id="throughput">0</strong><span>tok/s</span></div>
         <div class="spark-wrap"><svg id="spark" viewBox="0 0 320 72" preserveAspectRatio="none"><path class="spark-fill"></path><path class="spark-line"></path></svg></div>
         <div class="micro-row"><span>滑动平均</span><b id="throughputAverage">0 tok/s</b></div>
@@ -77,6 +77,22 @@
         <div class="cache-bars"><div><span>当前命中缓存</span><i><b id="cacheBar"></b></i></div><div><span>今日累计缓存</span><strong id="todayCache">—</strong></div></div>
         <div class="micro-row"><span>当前 turn 命中率</span><b id="cacheHit">—</b></div>
       </article>
+    </section>
+
+    <section class="usage-timeline-panel">
+      <div class="section-head timeline-head">
+        <div><p class="eyebrow">USAGE TIMELINE</p><h3>使用趋势</h3></div>
+        <div class="timeline-controls" role="tablist" aria-label="使用量时间范围">
+          <button type="button" data-usage-period="month" class="active">月</button>
+          <button type="button" data-usage-period="week">周</button>
+          <button type="button" data-usage-period="day">日</button>
+          <button type="button" data-usage-period="custom">自定义</button>
+          <label><span>FROM</span><input id="usageFrom" type="date" /></label>
+          <label><span>TO</span><input id="usageTo" type="date" /></label>
+        </div>
+      </div>
+      <div class="timeline-meta"><span id="timelineSummary">—</span><span id="timelineSource">—</span></div>
+      <div id="usageChart" class="usage-chart"><div class="empty">等待 usage 数据…</div></div>
     </section>
 
     <section class="lower-grid">

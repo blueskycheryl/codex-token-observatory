@@ -32,7 +32,7 @@ const state = {
   rateLimitCredits: null,
   history: { files: new Map(), lastScanAt: null, error: null },
   piHistory: { files: new Map(), lastScanAt: null, error: null },
-  throughput: { current: 0, average: 0, series: [] },
+  throughput: { current: 0, average: 0, series: [], source: "idle" },
   lastUsageSample: null,
   server: { port: PORT, host: HOST, codexHome: CODEX_HOME, piHome: PI_HOME },
 };
@@ -148,21 +148,36 @@ function handleRpc(message) {
   }
 }
 
+function recordThroughput(rate, source) {
+  const bounded = Math.max(0, Math.min(100000, rate));
+  state.throughput.current = state.throughput.current ? state.throughput.current * 0.65 + bounded * 0.35 : bounded;
+  state.throughput.series.push(Math.round(state.throughput.current));
+  if (state.throughput.series.length > 36) state.throughput.series.shift();
+  const samples = state.throughput.series;
+  state.throughput.average = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : 0;
+  state.throughput.source = source;
+}
+
 function updateThroughput(last) {
   if (!last) return;
   const now = Date.now();
   const output = number(last.outputTokens);
   const previous = state.lastUsageSample;
   if (previous && now > previous.at && output >= previous.output) {
-    const instant = (output - previous.output) / ((now - previous.at) / 1000);
-    const current = Math.max(0, Math.min(100000, instant));
-    state.throughput.current = state.throughput.current ? state.throughput.current * 0.65 + current * 0.35 : current;
-    state.throughput.series.push(Math.round(state.throughput.current));
-    if (state.throughput.series.length > 36) state.throughput.series.shift();
-    const samples = state.throughput.series;
-    state.throughput.average = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : 0;
+    recordThroughput((output - previous.output) / ((now - previous.at) / 1000), "live");
   }
   state.lastUsageSample = { at: now, output };
+}
+
+function updateHistoryThroughput(entry) {
+  const events = entry?.events || [];
+  if (events.length < 2) return;
+  const last = events.at(-1);
+  const previous = events.at(-2);
+  const elapsed = (last.at - previous.at) / 1000;
+  if (elapsed <= 0 || Date.now() - last.at > 5000 || number(last.usage?.outputTokens) <= 0) return;
+  state.lastUsageSample = { at: Date.now(), output: 0 };
+  recordThroughput(number(last.usage.outputTokens) / elapsed, "history");
 }
 
 async function connectAppServer() {
@@ -465,6 +480,28 @@ function historyTotals() {
   return { all, today, sinceReset, byModel, events };
 }
 
+function dailyUsageFromEvents(events) {
+  const daily = new Map();
+  for (const event of events || []) {
+    const date = event.date || localDate(event.at);
+    daily.set(date, (daily.get(date) || 0) + number(event.usage?.totalTokens));
+  }
+  return [...daily.entries()]
+    .map(([date, tokens]) => ({ date, tokens }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function buildUsageTimeline(events, officialBuckets = [], officialSource = false) {
+  const official = (officialBuckets || [])
+    .filter((bucket) => bucket?.startDate)
+    .map((bucket) => ({ date: String(bucket.startDate), tokens: number(bucket.tokens) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  return {
+    source: officialSource && official.length ? "official" : "local",
+    daily: officialSource && official.length ? official : dailyUsageFromEvents(events),
+  };
+}
+
 function getPrimaryRate() {
   return state.rateLimits?.primary || state.rateLimits?.rateLimits?.primary || null;
 }
@@ -548,6 +585,7 @@ function buildCodexViewState() {
       usedPercent: number(getPrimaryRate()?.usedPercent) || null,
     },
     rateLimits: state.rateLimits,
+    usageTimeline: buildUsageTimeline(history.events, state.accountUsage?.dailyUsageBuckets, true),
     models: [...models.values()].filter((item) => item.totalTokens > 0).sort((a, b) => b.totalTokens - a.totalTokens).map((item) => ({ ...item, sharePercent: lifetimeTokens ? (item.totalTokens / lifetimeTokens) * 100 : null })),
     throughput: state.throughput,
     history: { lastScanAt: state.history.lastScanAt, files: state.history.files.size, error: state.history.error },
@@ -614,10 +652,11 @@ function buildPiViewState() {
       source: "pi local session usage",
       windowLabel: "all local pi sessions",
     },
+    usageTimeline: buildUsageTimeline(totals.events),
     resetWindow: { start: null, resetsAt: null, durationMinutes: null, usedPercent: null },
     rateLimits: null,
     models,
-    throughput: { current: 0, average: 0, series: [] },
+    throughput: state.throughput,
     history: { lastScanAt: state.piHistory.lastScanAt, files: state.piHistory.files.size, error: state.piHistory.error },
     caveats: [
       "pi 数据来自 ~/.pi/agent/sessions 的本地 JSONL；不会上传会话内容。",
@@ -716,14 +755,27 @@ function startHttpServer() {
   return server;
 }
 
+function resetThroughputIfIdle() {
+  if (!state.lastUsageSample || Date.now() - state.lastUsageSample.at <= 2500) return;
+  state.throughput.current = 0;
+  state.throughput.average = 0;
+  state.throughput.source = "idle";
+  if (state.throughput.series.at(-1) !== 0) {
+    state.throughput.series.push(0);
+    if (state.throughput.series.length > 36) state.throughput.series.shift();
+  }
+}
+
 async function refresh() {
   await refreshHistory();
   await refreshPiHistory();
-  if (Date.now() - lastListAt >= POLL_MS) { lastListAt = Date.now(); await refreshThreads(); }
-  if (state.selectedThreadId && !state.liveThreadIds.has(state.selectedThreadId)) {
-    const historyLatest = findHistoryEntry(state.threads.find((item) => item.id === state.selectedThreadId))?.latest;
-    if (historyLatest?.last) updateThroughput(historyLatest.last);
+  resetThroughputIfIdle();
+  if (state.activeProcess === "codex" && state.selectedThreadId && !state.liveThreadIds.has(state.selectedThreadId)) {
+    updateHistoryThroughput(findHistoryEntry(state.threads.find((item) => item.id === state.selectedThreadId)));
+  } else if (state.activeProcess === "pi" && state.selectedThreadId) {
+    updateHistoryThroughput(piHistoryEntries().find((entry) => entry.session.id === state.selectedThreadId));
   }
+  if (Date.now() - lastListAt >= POLL_MS) { lastListAt = Date.now(); await refreshThreads(); }
   if (Date.now() - lastAccountAt >= POLL_MS) { lastAccountAt = Date.now(); await refreshAccountUsage(); }
   state.generatedAt = new Date().toISOString();
 }
