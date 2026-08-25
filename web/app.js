@@ -4,6 +4,7 @@ const integer = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 let currentState = null;
 let threadSearchQuery = '';
 let refreshTimer = null;
+let refreshInFlight = false;
 let autoRefresh = localStorage.getItem('codex-token-observer:auto-refresh') !== 'off';
 
 function fmt(value) {
@@ -216,6 +217,8 @@ function render(state) {
   setText('historyInfo', `${state.history?.files || 0} rollout files · ${state.history?.lastScanAt ? `scanned ${time(state.history.lastScanAt)}` : 'scanner warming'}`);
 }
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   try {
     const response = await fetch(`/api/state?ts=${Date.now()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -223,6 +226,8 @@ async function refresh() {
   } catch (error) {
     $('connection').classList.add('offline');
     $('connection').querySelector('span').textContent = 'DASHBOARD OFFLINE';
+  } finally {
+    refreshInFlight = false;
   }
 }
 async function switchDashboardProcess(processName) {

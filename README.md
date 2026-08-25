@@ -44,6 +44,8 @@ Codex 优先级如下：
 
 pi 使用本地 `~/.pi/agent/sessions/**/*.jsonl` 的模型调用 usage，pi 不提供 Codex rate-limit 重置窗口，因此对应额度信息显示为不可用。
 
+历史扫描器按 JSONL 字节偏移增量读取，只处理新追加的完整行。初次启动会流式汇总已有历史，后续不会因活跃会话增长而反复载入整个 rollout 文件；内存中只保留累计聚合和有界的近期事件窗口。
+
 ## 安装为本地插件
 
 在 Codex 插件目录中安装 `plugins/codex-token-observer`，或从 Codex 的本地插件安装入口选择本目录。安装后使用 `/token-dashboard`，或直接运行上面的 Node 命令。
@@ -53,4 +55,5 @@ pi 使用本地 `~/.pi/agent/sessions/**/*.jsonl` 的模型调用 usage，pi 不
 ```bash
 node --check plugins/codex-token-observer/scripts/observer.mjs
 node --check plugins/codex-token-observer/web/app.js
+node --test plugins/codex-token-observer/test/observer.test.mjs
 ```
