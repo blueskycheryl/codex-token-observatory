@@ -17,6 +17,9 @@ const HOST = process.env.CODEX_TOKEN_OBSERVER_HOST || "127.0.0.1";
 const POLL_MS = 5000;
 const HISTORY_POLL_MS = 1000;
 const MAX_THREADS = 100;
+const MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024;
+const MAX_RECENT_EVENTS_PER_FILE = 5000;
+const RECENT_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const state = {
   generatedAt: null,
@@ -43,7 +46,9 @@ let appServer = null;
 let appServerReady = null;
 let lastListAt = 0;
 let lastAccountAt = 0;
-let lastHistoryAt = 0;
+let lastCodexHistoryAt = 0;
+let lastPiHistoryAt = 0;
+let refreshInFlight = false;
 
 const zeroBreakdown = () => ({
   inputTokens: 0,
@@ -170,7 +175,7 @@ function updateThroughput(last) {
 }
 
 function updateHistoryThroughput(entry) {
-  const events = entry?.events || [];
+  const events = entry?.recentEvents || [];
   if (events.length < 2) return;
   const last = events.at(-1);
   const previous = events.at(-2);
@@ -242,6 +247,13 @@ async function refreshThreads() {
       useStateDbOnly: true,
     });
     state.threads = Array.isArray(result?.data) ? result.data : [];
+    const knownThreadIds = new Set(state.threads.map((item) => item.id));
+    for (const threadId of Object.keys(state.threadUsage)) {
+      if (!knownThreadIds.has(threadId)) delete state.threadUsage[threadId];
+    }
+    for (const threadId of state.liveThreadIds) {
+      if (!knownThreadIds.has(threadId)) state.liveThreadIds.delete(threadId);
+    }
     const codexSelected = state.selectedThreadByProcess.codex;
     if (!codexSelected || !state.threads.some((item) => item.id === codexSelected)) {
       state.selectedThreadByProcess.codex = state.threads[0]?.id || null;
@@ -308,52 +320,194 @@ function eventDelta(previous, current) {
   return result;
 }
 
-async function parseHistoryFile(file) {
-  const events = [];
-  let model = "未知模型";
-  let contextWindow = null;
-  let latest = null;
-  let previous = null;
-  let text;
-  try { text = await fsp.readFile(file, "utf8"); } catch { return { events, model, contextWindow }; }
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    const payload = row.payload || {};
-    const payloadType = payload.type;
-    if (payload.model || payload.model_slug) model = payload.model || payload.model_slug;
-    if (payload.model_context_window) contextWindow = number(payload.model_context_window) || contextWindow;
-    if (payloadType !== "token_count" || !payload.info) continue;
-    const info = payload.info;
-    const usage = info.total_token_usage || info.totalTokenUsage;
-    const current = usage ? {
-      inputTokens: usage.input_tokens ?? usage.inputTokens,
-      cachedInputTokens: usage.cached_input_tokens ?? usage.cachedInputTokens,
-      outputTokens: usage.output_tokens ?? usage.outputTokens,
-      reasoningOutputTokens: usage.reasoning_output_tokens ?? usage.reasoningOutputTokens,
-      totalTokens: usage.total_tokens ?? usage.totalTokens,
-    } : null;
-    if (!current) continue;
-    const lastUsage = info.last_token_usage || info.lastTokenUsage;
-    const timestamp = isoMs(row.timestamp);
-    latest = { at: timestamp, last: normalizedBreakdown({
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((item) => item?.type === "text").map((item) => item.text || "").join(" ").trim();
+}
+
+function addUsageToMap(map, key, usage, extra = {}) {
+  const current = map.get(key) || { ...zeroBreakdown(), ...extra };
+  addBreakdown(current, usage);
+  map.set(key, current);
+}
+
+function recordHistoryEvent(entry, event) {
+  addBreakdown(entry.totals, event.usage);
+  addUsageToMap(entry.daily, event.date, event.usage);
+  addUsageToMap(entry.byModel, event.model, event.usage, { model: event.model });
+  if (event.at >= Date.now() - RECENT_EVENT_RETENTION_MS) entry.recentEvents.push(event);
+  if (entry.recentEvents.length > MAX_RECENT_EVENTS_PER_FILE) {
+    entry.recentEvents.splice(0, entry.recentEvents.length - MAX_RECENT_EVENTS_PER_FILE);
+  }
+}
+
+function mergeUsageMap(target, source, extraKey = null) {
+  for (const [key, usage] of source) {
+    addUsageToMap(target, key, usage, extraKey ? { [extraKey]: key } : {});
+  }
+}
+
+export async function readJsonlLines(file, start, end, onLine, maxLineBytes = MAX_JSONL_LINE_BYTES) {
+  if (end < start) return { offset: start, skippedLines: 0 };
+  const stream = fs.createReadStream(file, { start, end });
+  let parts = [];
+  let partsLength = 0;
+  let droppingLine = false;
+  let processedOffset = start;
+  let streamOffset = start;
+  let skippedLines = 0;
+
+  for await (const value of stream) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    let cursor = 0;
+    while (cursor < chunk.length) {
+      const newline = chunk.indexOf(10, cursor);
+      const segmentEnd = newline === -1 ? chunk.length : newline;
+      const part = chunk.subarray(cursor, segmentEnd);
+      if (!droppingLine && part.length) {
+        if (partsLength + part.length <= maxLineBytes) {
+          parts.push(part);
+          partsLength += part.length;
+        } else {
+          parts = [];
+          partsLength = 0;
+          droppingLine = true;
+        }
+      }
+      if (newline === -1) break;
+
+      if (droppingLine) {
+        skippedLines += 1;
+      } else {
+        let line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partsLength);
+        if (line.at(-1) === 13) line = line.subarray(0, -1);
+        if (line.length) onLine(line);
+      }
+      parts = [];
+      partsLength = 0;
+      droppingLine = false;
+      processedOffset = streamOffset + newline + 1;
+      cursor = newline + 1;
+    }
+    streamOffset += chunk.length;
+  }
+  return { offset: processedOffset, skippedLines };
+}
+
+function lineTypes(line) {
+  const header = line.subarray(0, Math.min(line.length, 8192)).toString("utf8");
+  return [...header.matchAll(/"type"\s*:\s*"([^"\\]+)"/g)].slice(0, 2).map((match) => match[1]);
+}
+
+function extractJsonString(line, key) {
+  const prefix = line.subarray(0, Math.min(line.length, 512 * 1024)).toString("utf8");
+  const match = prefix.match(new RegExp(`"${key}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
+  if (!match) return null;
+  try { return JSON.parse(match[1]); } catch { return null; }
+}
+
+function extractJsonNumber(line, key) {
+  const prefix = line.subarray(0, Math.min(line.length, 512 * 1024)).toString("utf8");
+  const match = prefix.match(new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`));
+  return match ? number(match[1]) : 0;
+}
+
+export function createCodexHistoryEntry(file) {
+  return {
+    file,
+    marker: null,
+    fileId: null,
+    size: 0,
+    offset: 0,
+    skippedLines: 0,
+    model: "未知模型",
+    contextWindow: null,
+    latest: null,
+    previous: null,
+    totals: zeroBreakdown(),
+    daily: new Map(),
+    byModel: new Map(),
+    recentEvents: [],
+  };
+}
+
+function parseCodexHistoryLine(entry, line) {
+  const types = lineTypes(line);
+  const outerType = types[0];
+  const payloadType = outerType === "event_msg" ? types[1] : null;
+
+  if (outerType === "turn_context") {
+    entry.model = extractJsonString(line, "model") || entry.model;
+    entry.contextWindow = extractJsonNumber(line, "model_context_window") || entry.contextWindow;
+    return;
+  }
+  if (outerType === "session_meta") {
+    entry.contextWindow = extractJsonNumber(line, "context_window") || entry.contextWindow;
+    return;
+  }
+  if (outerType === "event_msg" && payloadType === "task_started") {
+    entry.contextWindow = extractJsonNumber(line, "model_context_window") || entry.contextWindow;
+    return;
+  }
+  if (payloadType !== "token_count" && outerType !== "token_count") return;
+
+  let row;
+  try { row = JSON.parse(line.toString("utf8")); } catch { return; }
+  const payload = row.payload || row;
+  const info = payload.info;
+  const usage = info?.total_token_usage || info?.totalTokenUsage;
+  if (!usage) return;
+  const current = normalizedBreakdown({
+    inputTokens: usage.input_tokens ?? usage.inputTokens,
+    cachedInputTokens: usage.cached_input_tokens ?? usage.cachedInputTokens,
+    outputTokens: usage.output_tokens ?? usage.outputTokens,
+    reasoningOutputTokens: usage.reasoning_output_tokens ?? usage.reasoningOutputTokens,
+    totalTokens: usage.total_tokens ?? usage.totalTokens,
+  });
+  const lastUsage = info.last_token_usage || info.lastTokenUsage;
+  const timestamp = isoMs(row.timestamp);
+  const delta = eventDelta(entry.previous, current);
+  const event = { at: timestamp, date: localDate(timestamp), model: entry.model, contextWindow: entry.contextWindow, usage: delta };
+  recordHistoryEvent(entry, event);
+  entry.previous = current;
+  entry.latest = {
+    at: timestamp,
+    last: normalizedBreakdown({
       inputTokens: lastUsage?.input_tokens ?? lastUsage?.inputTokens,
       cachedInputTokens: lastUsage?.cached_input_tokens ?? lastUsage?.cachedInputTokens,
       outputTokens: lastUsage?.output_tokens ?? lastUsage?.outputTokens,
       reasoningOutputTokens: lastUsage?.reasoning_output_tokens ?? lastUsage?.reasoningOutputTokens,
       totalTokens: lastUsage?.total_tokens ?? lastUsage?.totalTokens,
-    }), total: normalizedBreakdown(current), contextWindow };
-    const delta = eventDelta(previous, current);
-    events.push({ at: timestamp, date: localDate(timestamp), model, contextWindow, usage: delta });
-    previous = current;
+    }),
+    total: normalizedBreakdown(current),
+    contextWindow: entry.contextWindow,
+  };
+}
+
+export async function updateCodexHistoryEntry(file, previousEntry = null, stat = null) {
+  const snapshot = stat || await fsp.stat(file);
+  const marker = `${snapshot.mtimeMs}:${snapshot.size}`;
+  const fileId = `${snapshot.dev}:${snapshot.ino}`;
+  const mustReset = !previousEntry
+    || previousEntry.fileId !== fileId
+    || snapshot.size < previousEntry.offset
+    || (snapshot.size <= previousEntry.size && previousEntry.marker !== marker);
+  const entry = mustReset ? createCodexHistoryEntry(file) : previousEntry;
+  if (snapshot.size > entry.offset) {
+    const result = await readJsonlLines(file, entry.offset, snapshot.size - 1, (line) => parseCodexHistoryLine(entry, line));
+    entry.offset = result.offset;
+    entry.skippedLines += result.skippedLines;
   }
-  return { events, model, contextWindow, latest };
+  entry.marker = marker;
+  entry.fileId = fileId;
+  entry.size = snapshot.size;
+  return entry;
 }
 
 async function refreshHistory() {
-  if (Date.now() - lastHistoryAt < HISTORY_POLL_MS) return;
-  lastHistoryAt = Date.now();
+  if (Date.now() - lastCodexHistoryAt < HISTORY_POLL_MS) return;
+  lastCodexHistoryAt = Date.now();
   const roots = [path.join(CODEX_HOME, "sessions"), path.join(CODEX_HOME, "archived_sessions")];
   try {
     const files = (await Promise.all(roots.map((root) => walkJsonl(root)))).flat();
@@ -361,10 +515,10 @@ async function refreshHistory() {
     for (const file of files) {
       let stat;
       try { stat = await fsp.stat(file); } catch { continue; }
+      const previous = state.history.files.get(file);
       const marker = `${stat.mtimeMs}:${stat.size}`;
-      if (state.history.files.get(file)?.marker === marker) continue;
-      const parsed = await parseHistoryFile(file);
-      state.history.files.set(file, { marker, ...parsed });
+      if (previous?.marker === marker && previous.offset === stat.size) continue;
+      state.history.files.set(file, await updateCodexHistoryEntry(file, previous, stat));
     }
     for (const file of state.history.files.keys()) if (!known.has(file)) state.history.files.delete(file);
     state.history.lastScanAt = Date.now();
@@ -374,51 +528,75 @@ async function refreshHistory() {
   }
 }
 
-function contentText(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.filter((item) => item?.type === "text").map((item) => item.text || "").join(" ").trim();
+export function createPiHistoryEntry(file) {
+  return {
+    file,
+    marker: null,
+    fileId: null,
+    size: 0,
+    offset: 0,
+    skippedLines: 0,
+    session: { id: path.basename(file, ".jsonl"), cwd: null, timestamp: null },
+    model: "未知模型",
+    name: "未命名会话",
+    latest: null,
+    totals: zeroBreakdown(),
+    daily: new Map(),
+    byModel: new Map(),
+    recentEvents: [],
+  };
 }
 
-async function parsePiHistoryFile(file) {
-  const events = [];
-  let session = { id: path.basename(file, ".jsonl"), cwd: null, timestamp: null };
-  let model = "未知模型";
-  let name = "未命名会话";
-  let text;
-  try { text = await fsp.readFile(file, "utf8"); } catch { return { session, events, model, name, latest: null }; }
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    if (row.type === "session") {
-      session = { id: row.id || session.id, cwd: row.cwd || null, timestamp: row.timestamp || null };
-    } else if (row.type === "model_change") {
-      model = row.modelId || row.model || model;
-    }
-    const userText = row.type === "message" && row.message?.role === "user" ? contentText(row.message.content) : "";
-    if (userText && name === "未命名会话") name = userText.replace(/\s+/g, " ").slice(0, 72);
-    const raw = row.usage || row.message?.usage;
-    if (!raw) continue;
-    const usage = normalizedBreakdown({
-      inputTokens: raw.input ?? raw.inputTokens,
-      cachedInputTokens: raw.cacheRead ?? raw.cachedInputTokens,
-      cacheWriteInputTokens: raw.cacheWrite ?? raw.cacheWriteInputTokens,
-      outputTokens: raw.output ?? raw.outputTokens,
-      reasoningOutputTokens: raw.reasoning ?? raw.reasoningOutputTokens,
-      totalTokens: raw.totalTokens ?? raw.total_tokens,
-    });
-    if (!usage.totalTokens && !usage.inputTokens && !usage.outputTokens) continue;
-    const timestamp = isoMs(row.timestamp);
-    events.push({ at: timestamp, date: localDate(timestamp), model: row.model || model, usage });
+function parsePiHistoryLine(entry, line) {
+  let row;
+  try { row = JSON.parse(line.toString("utf8")); } catch { return; }
+  if (row.type === "session") {
+    entry.session = { id: row.id || entry.session.id, cwd: row.cwd || null, timestamp: row.timestamp || null };
+  } else if (row.type === "model_change") {
+    entry.model = row.modelId || row.model || entry.model;
   }
-  const total = zeroBreakdown();
-  for (const event of events) addBreakdown(total, event.usage);
-  return { session, events, model, name, latest: events.at(-1) ? { ...events.at(-1), total } : null };
+  const userText = row.type === "message" && row.message?.role === "user" ? contentText(row.message.content) : "";
+  if (userText && entry.name === "未命名会话") entry.name = userText.replace(/\s+/g, " ").slice(0, 72);
+  const raw = row.usage || row.message?.usage;
+  if (!raw) return;
+  const usage = normalizedBreakdown({
+    inputTokens: raw.input ?? raw.inputTokens,
+    cachedInputTokens: raw.cacheRead ?? raw.cachedInputTokens,
+    cacheWriteInputTokens: raw.cacheWrite ?? raw.cacheWriteInputTokens,
+    outputTokens: raw.output ?? raw.outputTokens,
+    reasoningOutputTokens: raw.reasoning ?? raw.reasoningOutputTokens,
+    totalTokens: raw.totalTokens ?? raw.total_tokens,
+  });
+  if (!usage.totalTokens && !usage.inputTokens && !usage.outputTokens) return;
+  const timestamp = isoMs(row.timestamp);
+  const event = { at: timestamp, date: localDate(timestamp), model: row.model || entry.model, usage };
+  recordHistoryEvent(entry, event);
+  entry.latest = { ...event, total: normalizedBreakdown(entry.totals) };
+}
+
+export async function updatePiHistoryEntry(file, previousEntry = null, stat = null) {
+  const snapshot = stat || await fsp.stat(file);
+  const marker = `${snapshot.mtimeMs}:${snapshot.size}`;
+  const fileId = `${snapshot.dev}:${snapshot.ino}`;
+  const mustReset = !previousEntry
+    || previousEntry.fileId !== fileId
+    || snapshot.size < previousEntry.offset
+    || (snapshot.size <= previousEntry.size && previousEntry.marker !== marker);
+  const entry = mustReset ? createPiHistoryEntry(file) : previousEntry;
+  if (snapshot.size > entry.offset) {
+    const result = await readJsonlLines(file, entry.offset, snapshot.size - 1, (line) => parsePiHistoryLine(entry, line));
+    entry.offset = result.offset;
+    entry.skippedLines += result.skippedLines;
+  }
+  entry.marker = marker;
+  entry.fileId = fileId;
+  entry.size = snapshot.size;
+  return entry;
 }
 
 async function refreshPiHistory() {
-  if (Date.now() - lastHistoryAt < HISTORY_POLL_MS) return;
+  if (Date.now() - lastPiHistoryAt < HISTORY_POLL_MS) return;
+  lastPiHistoryAt = Date.now();
   const root = path.join(PI_HOME, "sessions");
   try {
     const files = await walkJsonl(root);
@@ -426,10 +604,10 @@ async function refreshPiHistory() {
     for (const file of files) {
       let stat;
       try { stat = await fsp.stat(file); } catch { continue; }
+      const previous = state.piHistory.files.get(file);
       const marker = `${stat.mtimeMs}:${stat.size}`;
-      if (state.piHistory.files.get(file)?.marker === marker) continue;
-      const parsed = await parsePiHistoryFile(file);
-      state.piHistory.files.set(file, { marker, ...parsed });
+      if (previous?.marker === marker && previous.offset === stat.size) continue;
+      state.piHistory.files.set(file, await updatePiHistoryEntry(file, previous, stat));
     }
     for (const file of state.piHistory.files.keys()) if (!known.has(file)) state.piHistory.files.delete(file);
     state.piHistory.lastScanAt = Date.now();
@@ -440,65 +618,50 @@ async function refreshPiHistory() {
 }
 
 function piHistoryEntries() {
-  return [...state.piHistory.files.values()].filter((entry) => entry.events.length).sort((a, b) => isoMs(b.session.timestamp) - isoMs(a.session.timestamp));
+  return [...state.piHistory.files.values()].filter((entry) => entry.latest).sort((a, b) => isoMs(b.session.timestamp) - isoMs(a.session.timestamp));
+}
+
+function aggregateHistoryEntries(entries, includeReset = false) {
+  const all = zeroBreakdown();
+  const today = zeroBreakdown();
+  const sinceReset = zeroBreakdown();
+  const byModel = new Map();
+  const daily = new Map();
+  const resetStart = includeReset ? getResetWindowStart() : null;
+  for (const entry of entries) {
+    addBreakdown(all, entry.totals);
+    addBreakdown(today, entry.daily.get(localDate()));
+    mergeUsageMap(byModel, entry.byModel, "model");
+    mergeUsageMap(daily, entry.daily);
+    if (includeReset) {
+      for (const event of entry.recentEvents) if (event.at >= resetStart) addBreakdown(sinceReset, event.usage);
+    }
+  }
+  return { all, today, sinceReset, byModel, daily };
 }
 
 function piHistoryTotals(entries = piHistoryEntries()) {
-  const all = zeroBreakdown();
-  const today = zeroBreakdown();
-  const byModel = new Map();
-  const events = [];
-  for (const entry of entries) for (const event of entry.events) {
-    addBreakdown(all, event.usage);
-    if (event.date === localDate()) addBreakdown(today, event.usage);
-    const current = byModel.get(event.model) || { ...zeroBreakdown(), model: event.model };
-    addBreakdown(current, event.usage);
-    byModel.set(event.model, current);
-    events.push(event);
-  }
-  return { all, today, byModel, events };
+  return aggregateHistoryEntries(entries);
 }
 
 function historyTotals() {
-  const all = zeroBreakdown();
-  const today = zeroBreakdown();
-  const byModel = new Map();
-  const events = [];
-  for (const entry of state.history.files.values()) {
-    for (const event of entry.events) {
-      addBreakdown(all, event.usage);
-      if (event.date === localDate()) addBreakdown(today, event.usage);
-      const current = byModel.get(event.model) || { ...zeroBreakdown(), model: event.model };
-      addBreakdown(current, event.usage);
-      byModel.set(event.model, current);
-      events.push(event);
-    }
-  }
-  const resetStart = getResetWindowStart();
-  const sinceReset = zeroBreakdown();
-  for (const event of events) if (event.at >= resetStart) addBreakdown(sinceReset, event.usage);
-  return { all, today, sinceReset, byModel, events };
+  return aggregateHistoryEntries(state.history.files.values(), true);
 }
 
-function dailyUsageFromEvents(events) {
-  const daily = new Map();
-  for (const event of events || []) {
-    const date = event.date || localDate(event.at);
-    daily.set(date, (daily.get(date) || 0) + number(event.usage?.totalTokens));
-  }
-  return [...daily.entries()]
-    .map(([date, tokens]) => ({ date, tokens }))
+function dailyUsageFromMap(daily) {
+  return [...(daily || new Map()).entries()]
+    .map(([date, usage]) => ({ date, tokens: number(usage?.totalTokens) }))
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function buildUsageTimeline(events, officialBuckets = [], officialSource = false) {
+function buildUsageTimeline(daily, officialBuckets = [], officialSource = false) {
   const official = (officialBuckets || [])
     .filter((bucket) => bucket?.startDate)
     .map((bucket) => ({ date: String(bucket.startDate), tokens: number(bucket.tokens) }))
     .sort((a, b) => a.date.localeCompare(b.date));
   return {
     source: officialSource && official.length ? "official" : "local",
-    daily: officialSource && official.length ? official : dailyUsageFromEvents(events),
+    daily: officialSource && official.length ? official : dailyUsageFromMap(daily),
   };
 }
 
@@ -585,7 +748,7 @@ function buildCodexViewState() {
       usedPercent: number(getPrimaryRate()?.usedPercent) || null,
     },
     rateLimits: state.rateLimits,
-    usageTimeline: buildUsageTimeline(history.events, state.accountUsage?.dailyUsageBuckets, true),
+    usageTimeline: buildUsageTimeline(history.daily, state.accountUsage?.dailyUsageBuckets, true),
     models: [...models.values()].filter((item) => item.totalTokens > 0).sort((a, b) => b.totalTokens - a.totalTokens).map((item) => ({ ...item, sharePercent: lifetimeTokens ? (item.totalTokens / lifetimeTokens) * 100 : null })),
     throughput: state.throughput,
     history: { lastScanAt: state.history.lastScanAt, files: state.history.files.size, error: state.history.error },
@@ -615,7 +778,7 @@ function buildPiViewState() {
     name: entry.name || entry.session.cwd || "未命名会话",
     modelProvider: entry.model,
     status: "local",
-    updatedAt: entry.events.at(-1)?.at || isoMs(entry.session.timestamp),
+    updatedAt: entry.latest?.at || isoMs(entry.session.timestamp),
   }));
   const piReady = fs.existsSync(path.join(PI_HOME, "sessions"));
   return {
@@ -629,7 +792,7 @@ function buildPiViewState() {
       cwd: selectedEntry.session.cwd,
       modelProvider: selectedEntry.model,
       status: "local",
-      updatedAt: selectedEntry.events.at(-1)?.at || isoMs(selectedEntry.session.timestamp),
+      updatedAt: selectedEntry.latest?.at || isoMs(selectedEntry.session.timestamp),
     } : null,
     threads,
     current: {
@@ -652,7 +815,7 @@ function buildPiViewState() {
       source: "pi local session usage",
       windowLabel: "all local pi sessions",
     },
-    usageTimeline: buildUsageTimeline(totals.events),
+    usageTimeline: buildUsageTimeline(totals.daily),
     resetWindow: { start: null, resetsAt: null, durationMinutes: null, usedPercent: null },
     rateLimits: null,
     models,
@@ -780,15 +943,39 @@ async function refresh() {
   state.generatedAt = new Date().toISOString();
 }
 
-const server = startHttpServer();
-await connectAppServer();
-await refresh();
-const timer = setInterval(() => refresh().catch((error) => { state.connection.error = errorMessage(error); }), 1000);
+async function refreshWithoutOverlap() {
+  if (refreshInFlight) return false;
+  refreshInFlight = true;
+  try {
+    await refresh();
+    return true;
+  } catch (error) {
+    state.connection.error = errorMessage(error);
+    return false;
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+let server = null;
+let timer = null;
+
+export async function main() {
+  server = startHttpServer();
+  await connectAppServer();
+  await refreshWithoutOverlap();
+  timer = setInterval(refreshWithoutOverlap, 1000);
+}
 
 function shutdown() {
-  clearInterval(timer);
-  server.close();
+  if (timer) clearInterval(timer);
+  if (server) server.close();
   if (appServer && !appServer.killed) appServer.kill();
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await main();
+}
