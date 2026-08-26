@@ -717,30 +717,53 @@ function getSecondaryRate() {
   return state.rateLimits?.secondary || state.rateLimits?.rateLimits?.secondary || null;
 }
 
+function getFiveHourRate() {
+  return selectQuotaRates(getPrimaryRate(), getSecondaryRate()).fiveHour;
+}
+
+function rateWindowMinutes(rate) {
+  return number(rate?.windowDurationMins ?? rate?.window_minutes);
+}
+
+export function selectQuotaRates(primary, secondary) {
+  const rates = [primary, secondary].filter(Boolean);
+  const hasKnownDuration = rates.some((rate) => rateWindowMinutes(rate) > 0);
+  const shortWindow = rates.find((rate) => rateWindowMinutes(rate) > 0 && rateWindowMinutes(rate) < 24 * 60) || null;
+  const longWindow = rates.find((rate) => rateWindowMinutes(rate) >= 24 * 60) || null;
+  return {
+    fiveHour: shortWindow || (!hasKnownDuration ? primary || null : null),
+    weekly: longWindow || (!hasKnownDuration ? secondary || null : null),
+  };
+}
+
 function buildQuotaWindow(rate, label) {
-  const usedPercent = rate && Number.isFinite(Number(rate.usedPercent)) ? number(rate.usedPercent) : null;
-  const resetsAt = rate && number(rate.resetsAt) > 0 ? new Date(number(rate.resetsAt) * 1000).toISOString() : null;
+  const usedValue = rate?.usedPercent ?? rate?.used_percent;
+  const resetValue = rate?.resetsAt ?? rate?.resets_at;
+  const usedPercent = rate && Number.isFinite(Number(usedValue)) ? number(usedValue) : null;
+  const resetsAt = rate && number(resetValue) > 0 ? new Date(number(resetValue) * 1000).toISOString() : null;
+  const durationMinutes = rateWindowMinutes(rate);
   return {
     available: Boolean(rate),
     label,
     usedPercent,
     remainingPercent: usedPercent === null ? null : Math.max(0, Math.min(100, 100 - usedPercent)),
-    durationMinutes: rate && number(rate.windowDurationMins) > 0 ? number(rate.windowDurationMins) : null,
+    durationMinutes: durationMinutes > 0 ? durationMinutes : null,
     resetsAt,
   };
 }
 
 function buildQuotaWindows() {
+  const selected = selectQuotaRates(getPrimaryRate(), getSecondaryRate());
   return {
-    fiveHour: buildQuotaWindow(getPrimaryRate(), "5 小时额度"),
-    weekly: buildQuotaWindow(getSecondaryRate(), "周额度"),
+    fiveHour: buildQuotaWindow(selected.fiveHour, "5 小时额度"),
+    weekly: buildQuotaWindow(selected.weekly, "周额度"),
   };
 }
 
 function getResetWindowStart() {
-  const primary = getPrimaryRate();
-  const resetAt = number(primary?.resetsAt) * 1000;
-  const duration = number(primary?.windowDurationMins) * 60 * 1000;
+  const fiveHour = getFiveHourRate();
+  const resetAt = number(fiveHour?.resetsAt ?? fiveHour?.resets_at) * 1000;
+  const duration = rateWindowMinutes(fiveHour) * 60 * 1000;
   if (resetAt > Date.now() && duration > 0) return resetAt - duration;
   return Date.now() - (duration || 5 * 60 * 60 * 1000);
 }
@@ -813,9 +836,9 @@ function buildCodexViewState() {
     },
     resetWindow: {
       start: new Date(getResetWindowStart()).toISOString(),
-      resetsAt: getPrimaryRate()?.resetsAt ? new Date(number(getPrimaryRate().resetsAt) * 1000).toISOString() : null,
-      durationMinutes: number(getPrimaryRate()?.windowDurationMins) || null,
-      usedPercent: number(getPrimaryRate()?.usedPercent) || null,
+      resetsAt: getFiveHourRate()?.resetsAt || getFiveHourRate()?.resets_at ? new Date(number(getFiveHourRate()?.resetsAt ?? getFiveHourRate()?.resets_at) * 1000).toISOString() : null,
+      durationMinutes: rateWindowMinutes(getFiveHourRate()) || null,
+      usedPercent: Number.isFinite(Number(getFiveHourRate()?.usedPercent ?? getFiveHourRate()?.used_percent)) ? number(getFiveHourRate()?.usedPercent ?? getFiveHourRate()?.used_percent) : null,
     },
     quotaWindows: buildQuotaWindows(),
     rateLimits: state.rateLimits,

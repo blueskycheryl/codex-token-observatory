@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   readJsonlLines,
+  selectQuotaRates,
   updateCodexHistoryEntry,
   updatePiHistoryEntry,
 } from "../scripts/observer.mjs";
@@ -102,6 +103,15 @@ test("streaming reader skips an oversized line and continues at the next newline
   assert.deepEqual(lines, ["ok"]);
   assert.equal(result.skippedLines, 1);
   assert.equal(result.offset, snapshot.size);
+});
+
+test("quota windows are selected by duration even when Pro reverses primary and secondary", () => {
+  const selected = selectQuotaRates(
+    { usedPercent: 8, windowDurationMins: 10080 },
+    { usedPercent: 3, windowDurationMins: 300 },
+  );
+  assert.equal(selected.fiveHour.windowDurationMins, 300);
+  assert.equal(selected.weekly.windowDurationMins, 10080);
 });
 
 test("pi history appends usage without reparsing previous calls", async (t) => {
