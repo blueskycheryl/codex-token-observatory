@@ -20,6 +20,7 @@ const MAX_THREADS = 100;
 const MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_RECENT_EVENTS_PER_FILE = 5000;
 const RECENT_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const UNKNOWN_PROJECT = "未知项目";
 
 const state = {
   generatedAt: null,
@@ -103,6 +104,20 @@ function localDate(value = Date.now()) {
 function isoMs(value) {
   const parsed = Date.parse(value || "");
   return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function normalizeProjectPath(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return path.normalize(value.trim());
+}
+
+function projectKey(value) {
+  return normalizeProjectPath(value) || UNKNOWN_PROJECT;
+}
+
+function projectName(value) {
+  if (!value || value === UNKNOWN_PROJECT) return UNKNOWN_PROJECT;
+  return path.basename(value) || value;
 }
 
 function errorMessage(error) {
@@ -336,6 +351,8 @@ function recordHistoryEvent(entry, event) {
   addBreakdown(entry.totals, event.usage);
   addUsageToMap(entry.daily, event.date, event.usage);
   addUsageToMap(entry.byModel, event.model, event.usage, { model: event.model });
+  const project = projectKey(event.project || entry.project);
+  addUsageToMap(entry.byProject, project, event.usage, { project, name: projectName(project) });
   if (event.at >= Date.now() - RECENT_EVENT_RETENTION_MS) entry.recentEvents.push(event);
   if (entry.recentEvents.length > MAX_RECENT_EVENTS_PER_FILE) {
     entry.recentEvents.splice(0, entry.recentEvents.length - MAX_RECENT_EVENTS_PER_FILE);
@@ -343,8 +360,11 @@ function recordHistoryEvent(entry, event) {
 }
 
 function mergeUsageMap(target, source, extraKey = null) {
-  for (const [key, usage] of source) {
-    addUsageToMap(target, key, usage, extraKey ? { [extraKey]: key } : {});
+  for (const [key, usage] of source || []) {
+    const extra = extraKey === "project"
+      ? { project: key, name: projectName(key) }
+      : (extraKey ? { [extraKey]: key } : {});
+    addUsageToMap(target, key, usage, extra);
   }
 }
 
@@ -422,14 +442,22 @@ export function createCodexHistoryEntry(file) {
     offset: 0,
     skippedLines: 0,
     model: "未知模型",
+    project: null,
     contextWindow: null,
     latest: null,
     previous: null,
     totals: zeroBreakdown(),
     daily: new Map(),
     byModel: new Map(),
+    byProject: new Map(),
     recentEvents: [],
   };
+}
+
+function updateCodexProject(entry, payload) {
+  entry.project = normalizeProjectPath(payload?.cwd)
+    || normalizeProjectPath(payload?.workspace_roots?.[0])
+    || entry.project;
 }
 
 function parseCodexHistoryLine(entry, line) {
@@ -439,10 +467,14 @@ function parseCodexHistoryLine(entry, line) {
 
   if (outerType === "turn_context") {
     entry.model = extractJsonString(line, "model") || entry.model;
+    entry.project = extractJsonString(line, "cwd") || entry.project;
     entry.contextWindow = extractJsonNumber(line, "model_context_window") || entry.contextWindow;
     return;
   }
   if (outerType === "session_meta") {
+    let metadata;
+    try { metadata = JSON.parse(line.toString("utf8")); } catch { metadata = null; }
+    updateCodexProject(entry, metadata?.payload);
     entry.contextWindow = extractJsonNumber(line, "context_window") || entry.contextWindow;
     return;
   }
@@ -468,7 +500,7 @@ function parseCodexHistoryLine(entry, line) {
   const lastUsage = info.last_token_usage || info.lastTokenUsage;
   const timestamp = isoMs(row.timestamp);
   const delta = eventDelta(entry.previous, current);
-  const event = { at: timestamp, date: localDate(timestamp), model: entry.model, contextWindow: entry.contextWindow, usage: delta };
+  const event = { at: timestamp, date: localDate(timestamp), model: entry.model, project: entry.project, contextWindow: entry.contextWindow, usage: delta };
   recordHistoryEvent(entry, event);
   entry.previous = current;
   entry.latest = {
@@ -537,12 +569,14 @@ export function createPiHistoryEntry(file) {
     offset: 0,
     skippedLines: 0,
     session: { id: path.basename(file, ".jsonl"), cwd: null, timestamp: null },
+    project: null,
     model: "未知模型",
     name: "未命名会话",
     latest: null,
     totals: zeroBreakdown(),
     daily: new Map(),
     byModel: new Map(),
+    byProject: new Map(),
     recentEvents: [],
   };
 }
@@ -552,6 +586,7 @@ function parsePiHistoryLine(entry, line) {
   try { row = JSON.parse(line.toString("utf8")); } catch { return; }
   if (row.type === "session") {
     entry.session = { id: row.id || entry.session.id, cwd: row.cwd || null, timestamp: row.timestamp || null };
+    entry.project = normalizeProjectPath(row.cwd) || entry.project;
   } else if (row.type === "model_change") {
     entry.model = row.modelId || row.model || entry.model;
   }
@@ -569,7 +604,7 @@ function parsePiHistoryLine(entry, line) {
   });
   if (!usage.totalTokens && !usage.inputTokens && !usage.outputTokens) return;
   const timestamp = isoMs(row.timestamp);
-  const event = { at: timestamp, date: localDate(timestamp), model: row.model || entry.model, usage };
+  const event = { at: timestamp, date: localDate(timestamp), model: row.model || entry.model, project: entry.project || entry.session.cwd, usage };
   recordHistoryEvent(entry, event);
   entry.latest = { ...event, total: normalizedBreakdown(entry.totals) };
 }
@@ -626,18 +661,20 @@ function aggregateHistoryEntries(entries, includeReset = false) {
   const today = zeroBreakdown();
   const sinceReset = zeroBreakdown();
   const byModel = new Map();
+  const byProject = new Map();
   const daily = new Map();
   const resetStart = includeReset ? getResetWindowStart() : null;
   for (const entry of entries) {
     addBreakdown(all, entry.totals);
     addBreakdown(today, entry.daily.get(localDate()));
     mergeUsageMap(byModel, entry.byModel, "model");
+    mergeUsageMap(byProject, entry.byProject, "project");
     mergeUsageMap(daily, entry.daily);
     if (includeReset) {
       for (const event of entry.recentEvents) if (event.at >= resetStart) addBreakdown(sinceReset, event.usage);
     }
   }
-  return { all, today, sinceReset, byModel, daily };
+  return { all, today, sinceReset, byModel, byProject, daily };
 }
 
 function piHistoryTotals(entries = piHistoryEntries()) {
@@ -654,6 +691,13 @@ function dailyUsageFromMap(daily) {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+function usageMapRows(map, totalTokens) {
+  return [...(map || new Map()).values()]
+    .filter((item) => item.totalTokens > 0)
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((item) => ({ ...item, sharePercent: totalTokens ? (item.totalTokens / totalTokens) * 100 : null }));
+}
+
 function buildUsageTimeline(daily, officialBuckets = [], officialSource = false) {
   const official = (officialBuckets || [])
     .filter((bucket) => bucket?.startDate)
@@ -667,6 +711,30 @@ function buildUsageTimeline(daily, officialBuckets = [], officialSource = false)
 
 function getPrimaryRate() {
   return state.rateLimits?.primary || state.rateLimits?.rateLimits?.primary || null;
+}
+
+function getSecondaryRate() {
+  return state.rateLimits?.secondary || state.rateLimits?.rateLimits?.secondary || null;
+}
+
+function buildQuotaWindow(rate, label) {
+  const usedPercent = rate && Number.isFinite(Number(rate.usedPercent)) ? number(rate.usedPercent) : null;
+  const resetsAt = rate && number(rate.resetsAt) > 0 ? new Date(number(rate.resetsAt) * 1000).toISOString() : null;
+  return {
+    available: Boolean(rate),
+    label,
+    usedPercent,
+    remainingPercent: usedPercent === null ? null : Math.max(0, Math.min(100, 100 - usedPercent)),
+    durationMinutes: rate && number(rate.windowDurationMins) > 0 ? number(rate.windowDurationMins) : null,
+    resetsAt,
+  };
+}
+
+function buildQuotaWindows() {
+  return {
+    fiveHour: buildQuotaWindow(getPrimaryRate(), "5 小时额度"),
+    weekly: buildQuotaWindow(getSecondaryRate(), "周额度"),
+  };
 }
 
 function getResetWindowStart() {
@@ -700,6 +768,7 @@ function buildCodexViewState() {
   const todayTokens = officialToday || history.today.totalTokens;
   const lifetimeTokens = officialLifetime || history.all.totalTokens;
   const resetTokens = history.sinceReset.totalTokens;
+  const projects = usageMapRows(history.byProject, lifetimeTokens);
   const cachedTokens = isLive ? last.cachedInputTokens : null;
   return {
     generatedAt: new Date().toISOString(),
@@ -709,7 +778,8 @@ function buildCodexViewState() {
     selectedThread: thread ? {
       id: thread.id,
       name: thread.name || thread.preview || "未命名线程",
-      cwd: thread.cwd,
+      cwd: historyEntry?.project || thread.cwd,
+      project: historyEntry?.project || thread.cwd || null,
       modelProvider: thread.modelProvider,
       status: thread.status?.type || "unknown",
       updatedAt: thread.updatedAt,
@@ -747,14 +817,17 @@ function buildCodexViewState() {
       durationMinutes: number(getPrimaryRate()?.windowDurationMins) || null,
       usedPercent: number(getPrimaryRate()?.usedPercent) || null,
     },
+    quotaWindows: buildQuotaWindows(),
     rateLimits: state.rateLimits,
     usageTimeline: buildUsageTimeline(history.daily, state.accountUsage?.dailyUsageBuckets, true),
     models: [...models.values()].filter((item) => item.totalTokens > 0).sort((a, b) => b.totalTokens - a.totalTokens).map((item) => ({ ...item, sharePercent: lifetimeTokens ? (item.totalTokens / lifetimeTokens) * 100 : null })),
+    projects,
     throughput: state.throughput,
     history: { lastScanAt: state.history.lastScanAt, files: state.history.files.size, error: state.history.error },
     caveats: [
       "当前上下文使用量来自 Codex app-server 的 last.inputTokens；历史回溯来自本地 rollout JSONL。",
       "按模型的历史明细依赖 rollout 中的模型字段；无法识别的记录归入“未知模型”。",
+      "按项目使用量按会话 cwd / workspace root 聚合；无法识别的记录归入“未知项目”。",
       "未使用模型的配额不是 Codex 公开接口；面板不会把它估算成 0。",
     ],
   };
@@ -773,6 +846,7 @@ function buildPiViewState() {
   const models = [...totals.byModel.values()].filter((item) => item.totalTokens > 0)
     .sort((a, b) => b.totalTokens - a.totalTokens)
     .map((item) => ({ ...item, sharePercent: totals.all.totalTokens ? (item.totalTokens / totals.all.totalTokens) * 100 : null }));
+  const projects = usageMapRows(totals.byProject, totals.all.totalTokens);
   const threads = entries.slice(0, MAX_THREADS).map((entry) => ({
     id: entry.session.id,
     name: entry.name || entry.session.cwd || "未命名会话",
@@ -789,7 +863,8 @@ function buildPiViewState() {
     selectedThread: selectedEntry ? {
       id: selectedEntry.session.id,
       name: selectedEntry.name || selectedEntry.session.cwd || "未命名会话",
-      cwd: selectedEntry.session.cwd,
+      cwd: selectedEntry.project || selectedEntry.session.cwd,
+      project: selectedEntry.project || selectedEntry.session.cwd || null,
       modelProvider: selectedEntry.model,
       status: "local",
       updatedAt: selectedEntry.latest?.at || isoMs(selectedEntry.session.timestamp),
@@ -817,14 +892,17 @@ function buildPiViewState() {
     },
     usageTimeline: buildUsageTimeline(totals.daily),
     resetWindow: { start: null, resetsAt: null, durationMinutes: null, usedPercent: null },
+    quotaWindows: { fiveHour: null, weekly: null },
     rateLimits: null,
     models,
+    projects,
     throughput: state.throughput,
     history: { lastScanAt: state.piHistory.lastScanAt, files: state.piHistory.files.size, error: state.piHistory.error },
     caveats: [
       "pi 数据来自 ~/.pi/agent/sessions 的本地 JSONL；不会上传会话内容。",
       "今日和累计使用量按 pi 会话中记录的模型调用 usage 汇总。",
-      "pi 本地会话不提供 Codex rate-limit 重置窗口和实时 token/s 数据。",
+      "按项目使用量按 pi 会话 cwd 聚合；无法识别的记录归入“未知项目”。",
+      "pi 本地会话不提供 Codex rate-limit 重置窗口和实时 token/s 数据。"
     ],
   };
 }
@@ -833,10 +911,20 @@ function buildViewState() {
   return state.activeProcess === "pi" ? buildPiViewState() : buildCodexViewState();
 }
 
+function historyEntriesForThread(thread) {
+  if (!thread) return [];
+  return [...state.history.files.entries()]
+    .filter(([file]) => file.includes(thread.id))
+    .sort(([, a], [, b]) => {
+      const aAt = a.latest?.at || 0;
+      const bAt = b.latest?.at || 0;
+      if (aAt !== bAt) return bAt - aAt;
+      return Number(Boolean(b.latest)) - Number(Boolean(a.latest));
+    });
+}
+
 function findHistoryEntry(thread) {
-  if (!thread) return null;
-  const matching = [...state.history.files.entries()].find(([file]) => file.includes(thread.id));
-  return matching?.[1] || null;
+  return historyEntriesForThread(thread)[0]?.[1] || null;
 }
 
 function findHistoryContextWindow(thread) {
@@ -844,9 +932,7 @@ function findHistoryContextWindow(thread) {
 }
 
 function findHistoryModel(thread) {
-  if (!thread) return null;
-  const matching = [...state.history.files.entries()].find(([file]) => file.includes(thread.id));
-  return matching?.[1]?.model || null;
+  return findHistoryEntry(thread)?.model || null;
 }
 
 function sumOfficialToday() {

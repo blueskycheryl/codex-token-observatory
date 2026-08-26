@@ -3,6 +3,7 @@ const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFra
 const integer = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 let currentState = null;
 let threadSearchQuery = '';
+let projectSearchQuery = '';
 let refreshTimer = null;
 let refreshInFlight = false;
 let autoRefresh = localStorage.getItem('codex-token-observer:auto-refresh') !== 'off';
@@ -82,6 +83,20 @@ function renderModels(models) {
   if (!models?.length) { root.innerHTML = '<div class="empty">等待 usage 数据…</div>'; return; }
   root.innerHTML = models.slice(0, 8).map((model) => `<div class="model-row"><span class="model-name" title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</span><div class="model-bar"><span style="width:${Math.max(2, Math.min(100, Number(model.sharePercent) || 0))}%"></span></div><span class="model-tokens">${fmt(model.totalTokens)}</span><span class="model-share">${pct(model.sharePercent)}</span></div>`).join('');
 }
+function renderProjects(projects) {
+  const root = $('projects');
+  if (!projects?.length) { root.innerHTML = '<div class="empty">等待 project usage 数据…</div>'; return; }
+  const query = projectSearchQuery.trim().toLowerCase();
+  const filtered = projects.filter((project) => [project.name, project.project]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(query)));
+  if (!filtered.length) { root.innerHTML = '<div class="empty">没有匹配的项目</div>'; return; }
+  root.innerHTML = filtered.slice(0, 50).map((project) => {
+    const label = project.name || project.project || '未知项目';
+    const location = project.project && project.project !== label ? project.project : '未记录工作目录';
+    return `<div class="project-row"><div class="project-copy"><strong title="${escapeHtml(location)}">${escapeHtml(label)}</strong><small title="${escapeHtml(location)}">${escapeHtml(location)}</small></div><div class="project-bar"><span style="width:${Math.max(2, Math.min(100, Number(project.sharePercent) || 0))}%"></span></div><span class="project-tokens">${fmt(project.totalTokens)}</span><span class="project-share">${pct(project.sharePercent)}</span></div>`;
+  }).join('');
+}
 let usagePeriod = localStorage.getItem('codex-token-observer:usage-period') || 'month';
 
 function localIsoDate(date) {
@@ -156,7 +171,16 @@ function updateProcessSwitch(processName) {
   document.querySelectorAll('[data-process]').forEach((button) => button.classList.toggle('active', button.dataset.process === process));
   setText('processLabel', `LOCAL TELEMETRY / ${process.toUpperCase()}`);
   setText('threadLabel', process === 'pi' ? '会话' : '线程');
-  setText('quotaLabel', process === 'pi' ? 'PI LOCAL USAGE' : 'AVAILABLE CAPACITY');
+}
+function renderQuotaWindow(prefix, window, isPi) {
+  const available = !isPi && window?.available;
+  const remaining = available && window.remainingPercent !== null ? `${Number(window.remainingPercent).toFixed(1)}%` : '—';
+  const used = available && window.usedPercent !== null ? `已使用 ${Number(window.usedPercent).toFixed(1)}%` : (isPi ? 'pi 不提供额度窗口' : '使用量不可用');
+  const reset = available && window.resetsAt ? `重置 ${dateTime(window.resetsAt)}` : (isPi ? '本地会话数据' : '重置时间 —');
+  setText(`quota${prefix}Remaining`, remaining);
+  setText(`quota${prefix}Used`, used);
+  setText(`quota${prefix}Reset`, reset);
+  $(`quota${prefix}Meter`).style.width = `${available ? (window.remainingPercent || 0) : 0}%`;
 }
 function render(state) {
   currentState = state;
@@ -167,13 +191,11 @@ function render(state) {
   connection.classList.toggle('offline', !ready);
   connection.querySelector('span').textContent = ready ? (isPi ? 'PI LOCAL LIVE' : 'APP-SERVER LIVE') : (state.connection?.status || 'OFFLINE').toUpperCase();
   updateThreadSelect(state.threads, state.selectedThreadId);
-  const usedPercent = Number.isFinite(Number(state.resetWindow?.usedPercent)) ? Number(state.resetWindow.usedPercent) : null;
-  const remainingPercent = usedPercent === null ? null : Math.max(0, Math.min(100, 100 - usedPercent));
-  setText('quotaRemaining', isPi || remainingPercent === null ? '—' : `${remainingPercent.toFixed(1)}%`);
-  setText('quotaResetAt', isPi ? '—' : dateTime(state.resetWindow?.resetsAt));
-  setText('quotaResetWindow', isPi ? 'local session data' : (state.resetWindow?.durationMinutes ? `${state.resetWindow.durationMinutes} min window` : 'window unavailable'));
-  setText('quotaUsageHint', isPi ? '按 pi 本地会话 usage 汇总 · 不提供额度上限' : (usedPercent === null ? 'Codex rate-limit 数据不可用' : `已使用 ${usedPercent.toFixed(1)}% · 剩余 ${remainingPercent.toFixed(1)}%`));
-  $('quotaMeter').style.width = `${isPi ? 0 : (remainingPercent || 0)}%`;
+  const quotaWindows = state.quotaWindows || {};
+  renderQuotaWindow('FiveHour', quotaWindows.fiveHour, isPi);
+  renderQuotaWindow('Weekly', quotaWindows.weekly, isPi);
+  const plan = state.rateLimits?.planType ? ` · ${state.rateLimits.planType}` : '';
+  setText('quotaUsageHint', isPi ? '按 pi 本地会话 usage 汇总 · 不提供额度上限' : (quotaWindows.fiveHour?.available || quotaWindows.weekly?.available ? `Plus 额度窗口已同步${plan}` : 'Codex rate-limit 数据不可用'));
 
   const current = state.current || {};
   const percent = Number.isFinite(Number(current.contextPercent)) ? Number(current.contextPercent) : null;
@@ -204,6 +226,7 @@ function render(state) {
   setText('lifetimeTokens', fmt(state.account?.lifetimeTokens));
   setText('resetLabel', state.account?.windowLabel || (state.resetWindow?.durationMinutes ? `${state.resetWindow.durationMinutes} min window` : 'active window'));
   renderModels(state.models);
+  renderProjects(state.projects);
   renderUsageTimeline(state.usageTimeline);
 
   const thread = state.selectedThread;
@@ -262,6 +285,10 @@ $('threadSearch').addEventListener('keydown', (event) => {
     threadSearchQuery = '';
     updateThreadSelect(currentState?.threads || [], currentState?.selectedThreadId);
   }
+});
+$('projectSearch').addEventListener('input', (event) => {
+  projectSearchQuery = event.target.value;
+  renderProjects(currentState?.projects || []);
 });
 document.querySelectorAll('[data-usage-period]').forEach((button) => {
   button.addEventListener('click', () => {

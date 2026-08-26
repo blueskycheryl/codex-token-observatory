@@ -29,15 +29,19 @@
       <article class="usage-panel top-usage-panel">
         <div class="section-head"><div><p class="eyebrow">ACCOUNT WINDOW</p><h3>使用量总览</h3></div><span class="source" id="usageSource">—</span></div>
         <div class="quota-strip">
-          <div class="quota-copy">
-            <p class="eyebrow"><span id="quotaLabel">AVAILABLE CAPACITY</span> <strong id="quotaRemaining">—</strong></p>
-            <p id="quotaUsageHint">等待 Codex rate-limit 数据…</p>
+          <div class="quota-windows">
+            <article class="quota-window">
+              <div class="quota-window-head"><div><p class="eyebrow">5-HOUR WINDOW</p><strong>5 小时额度</strong></div><b id="quotaFiveHourRemaining">—</b></div>
+              <div class="quota-window-meta"><span id="quotaFiveHourUsed">使用量不可用</span><span id="quotaFiveHourReset">重置时间 —</span></div>
+              <div class="quota-window-meter"><span id="quotaFiveHourMeter"></span></div>
+            </article>
+            <article class="quota-window">
+              <div class="quota-window-head"><div><p class="eyebrow">WEEKLY WINDOW</p><strong>周额度</strong></div><b id="quotaWeeklyRemaining">—</b></div>
+              <div class="quota-window-meta"><span id="quotaWeeklyUsed">使用量不可用</span><span id="quotaWeeklyReset">重置时间 —</span></div>
+              <div class="quota-window-meter"><span id="quotaWeeklyMeter"></span></div>
+            </article>
           </div>
-          <div class="reset-overview">
-            <span class="pulse"></span>
-            <div><p class="eyebrow">RESET TIME</p><strong id="quotaResetAt">—</strong><small id="quotaResetWindow">—</small></div>
-          </div>
-          <div class="quota-meter"><span id="quotaMeter"></span></div>
+          <p id="quotaUsageHint">等待 Codex rate-limit 数据…</p>
         </div>
         <div class="usage-cards">
           <div class="usage-stat featured"><span>今日已用额度</span><strong id="todayTokens">—</strong><small>local calendar day</small></div>
@@ -95,21 +99,23 @@
       <div id="usageChart" class="usage-chart"><div class="empty">等待 usage 数据…</div></div>
     </section>
 
-    <section class="lower-grid">
-      <div class="left-column">
-        <article class="model-panel">
-          <div class="section-head"><div><p class="eyebrow">MODEL MIX</p><h3>按模型分布</h3></div><span class="muted">来自本地 usage 记录</span></div>
-          <div id="models" class="models"><div class="empty">等待 usage 数据…</div></div>
-        </article>
-      </div>
+    <section class="distribution-grid">
+      <article class="project-panel">
+        <div class="section-head project-head"><div><p class="eyebrow">PROJECT LEDGER</p><h3>按项目使用</h3></div><label class="project-search"><span>⌕</span><input id="projectSearch" type="search" placeholder="搜索项目或路径…" autocomplete="off" /></label></div>
+        <div id="projects" class="projects"><div class="empty">等待 usage 数据…</div></div>
+      </article>
+      <article class="model-panel">
+        <div class="section-head"><div><p class="eyebrow">MODEL MIX</p><h3>按模型分布</h3></div><span class="muted">来自本地 usage 记录</span></div>
+        <div id="models" class="models"><div class="empty">等待 usage 数据…</div></div>
+      </article>
+    </section>
 
-      <aside class="side-column">
-        <article class="notes-panel">
-          <div class="section-head"><div><p class="eyebrow">INSTRUMENT NOTES</p><h3>读数说明</h3></div><span class="info">i</span></div>
-          <ul id="notes"></ul>
-          <div class="privacy"><span>⌁</span><p>本地优先<br><b>不上传 prompt / token 数据</b></p></div>
-        </article>
-      </aside>
+    <section class="notes-footer">
+      <article class="notes-panel">
+        <div class="section-head"><div><p class="eyebrow">INSTRUMENT NOTES</p><h3>读数说明</h3></div><span class="info">i</span></div>
+        <ul id="notes"></ul>
+        <div class="privacy"><span>⌁</span><p>本地优先<br><b>不上传 prompt / token 数据</b></p></div>
+      </article>
     </section>
     <footer><span>CODEX TOKEN OBSERVATORY · v0.1</span><span id="historyInfo">history scanner idle</span></footer>
   </main>

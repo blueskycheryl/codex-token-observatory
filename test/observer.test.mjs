@@ -49,7 +49,7 @@ test("Codex history is parsed incrementally and waits for a complete final line"
   const second = codexRow({ input: 15, output: 4, total: 19 }, { input: 5, output: 2, total: 7 }, "2026-08-25T10:01:00.000Z");
   const third = codexRow({ input: 20, output: 5, total: 25 }, { input: 5, output: 1, total: 6 }, "2026-08-25T10:02:00.000Z");
   const metadata = [
-    JSON.stringify({ timestamp: "2026-08-25T09:59:00.000Z", type: "turn_context", payload: { model: "gpt-test" } }),
+    JSON.stringify({ timestamp: "2026-08-25T09:59:00.000Z", type: "turn_context", payload: { model: "gpt-test", cwd: "/tmp/project" } }),
     JSON.stringify({ timestamp: "2026-08-25T09:59:01.000Z", type: "event_msg", payload: { type: "task_started", model_context_window: 128000 } }),
   ];
   const splitAt = third.length - 12;
@@ -58,6 +58,8 @@ test("Codex history is parsed incrementally and waits for a complete final line"
   let entry = await updateCodexHistoryEntry(file);
   assert.equal(entry.model, "gpt-test");
   assert.equal(entry.contextWindow, 128000);
+  assert.equal(entry.project, "/tmp/project");
+  assert.equal(entry.byProject.get("/tmp/project").totalTokens, 19);
   assert.equal(entry.totals.inputTokens, 15);
   assert.equal(entry.totals.outputTokens, 4);
   assert.equal(entry.totals.totalTokens, 19);
@@ -113,6 +115,8 @@ test("pi history appends usage without reparsing previous calls", async (t) => {
   let entry = await updatePiHistoryEntry(file);
   assert.equal(entry.session.id, "pi-1");
   assert.equal(entry.model, "pi-model");
+  assert.equal(entry.project, "/tmp/project");
+  assert.equal(entry.byProject.get("/tmp/project").totalTokens, 12);
   assert.equal(entry.totals.totalTokens, 12);
 
   await appendFile(file, `${usage(5, 1, "2026-08-25T10:02:00.000Z")}\n`);

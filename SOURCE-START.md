@@ -185,6 +185,7 @@ CODEX_BIN=/path/to/codex node scripts/account-usage.mjs
 | 今日/累计使用 fallback | 本地 rollout JSONL | 官方 usage 接口失败时使用 |
 | 剩余额度、使用百分比、重置时间 | `account/rateLimits/read` / 更新通知 | 需要 Codex 账号登录和网络访问 ChatGPT 接口 |
 | 按模型分布 | 本地 rollout JSONL 的模型字段 | 对本地历史记录聚合 |
+| 按项目使用量 | Codex `session_meta` / `turn_context` 的 cwd，或 pi 会话 cwd | 按会话工作目录聚合 input、cache、output、total tokens；缺失时归入“未知项目” |
 | 使用趋势柱状图 | 官方 `dailyUsageBuckets`，失败时本地 JSONL | 支持按月、按周聚合，以及自定义日期区间的每日明细 |
 | 上下文容量 | app-server 或 rollout 中的模型 context window | 无法确认时显示不可用 |
 
@@ -214,6 +215,7 @@ Codex 的额度数据虽然由本地 Dashboard 展示，但来源是 Codex app-s
 | 输出 token | `output` | 汇总或最近一次调用 |
 | 缓存 | `cacheRead`、`cacheWrite` | 按会话和日期聚合 |
 | 按模型分布 | 会话记录的 `model` / `model_change` | 按模型汇总 |
+| 按项目使用量 | pi 会话的 `cwd` | 按会话工作目录聚合 input、cache、output、total tokens |
 | 上下文容量 | `~/.pi/agent/models.json`、`models-store.json` | 读取对应模型的 `contextWindow` |
 | 最近观测速度 | 最近两次会话 usage 记录 | 只标记为 `RECENT` |
 
